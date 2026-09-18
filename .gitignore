@@ -1,0 +1,19 @@
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+*.ipr
+*.iws
+
+### Eclipse ###
+.classpath
+.project
+.settings/
+
+### Mac OS ###
+.DS_Store
+
+### accidental local path ###
+D:\\tools\\repository/
