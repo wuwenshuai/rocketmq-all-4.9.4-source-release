@@ -30,7 +30,7 @@ public class Producer {
     /**
      * The number of produced messages.
      */
-    public static final int MESSAGE_COUNT = 1000;
+    public static final int MESSAGE_COUNT = 10; // Day3：跟断点时先改小，别发 1000 条
     public static final String PRODUCER_GROUP = "please_rename_unique_group_name";
     public static final String DEFAULT_NAMESRVADDR = "127.0.0.1:9876";
     public static final String TOPIC = "TopicTest";
@@ -53,8 +53,8 @@ public class Producer {
          * }
          * </pre>
          */
-        // Uncomment the following line while debugging, namesrvAddr should be set to your local address
-//        producer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
+        // Day3：本地调试必须设置 NameServer，否则客户端不知道去哪查路由
+        producer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
 
         /*
          * Launch the instance.
@@ -73,7 +73,9 @@ public class Producer {
                 );
 
                 /*
-                 * Call send message to deliver message to one of brokers.
+                 * Day3：同步发送入口。
+                 * 调用链：DefaultMQProducer.send → DefaultMQProducerImpl.sendDefaultImpl
+                 * → sendKernelImpl → Broker SendMessageProcessor → MessageStore.asyncPutMessage
                  */
                 SendResult sendResult = producer.send(msg);
                 /*

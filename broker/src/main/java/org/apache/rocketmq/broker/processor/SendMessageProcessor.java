@@ -70,7 +70,10 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         super(brokerController);
     }
 
-    //这里通过RemotingServerTest  由此可得，如果生产者发送消息，那么以下方法就是Broker的入口方法
+    /**
+     * Day3：Broker 收消息入口（Netty 把 SEND_MESSAGE 派到这里）。
+     * 实际干活在 asyncProcessRequest → asyncSendMessage。
+     */
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx,
                                           RemotingCommand request) throws RemotingCommandException {
@@ -88,6 +91,9 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         asyncProcessRequest(ctx, request).thenAcceptAsync(responseCallback::callback, this.brokerController.getPutMessageFutureExecutor());
     }
 
+    /**
+     * Day3：按请求码分流。普通发送走 asyncSendMessage；消费失败回退走 CONSUMER_SEND_MSG_BACK。
+     */
     public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx,
                                                                   RemotingCommand request) throws RemotingCommandException {
         final SendMessageContext mqtraceContext;
@@ -104,6 +110,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 if (requestHeader.isBatch()) {
                     return this.asyncSendBatchMessage(ctx, request, mqtraceContext, requestHeader);
                 } else {
+                    // Day3主线：单条普通消息
                     return this.asyncSendMessage(ctx, request, mqtraceContext, requestHeader);
                 }
         }
@@ -265,6 +272,10 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
     }
 
 
+    /**
+     * Day3：Broker 处理单条发送。
+     * 组装 MessageExtBrokerInner → 写入 MessageStore → 把结果填回 response。
+     */
     private CompletableFuture<RemotingCommand> asyncSendMessage(ChannelHandlerContext ctx, RemotingCommand request,
                                                                 SendMessageContext mqtraceContext,
                                                                 SendMessageRequestHeader requestHeader) {
@@ -280,10 +291,11 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         int queueIdInt = requestHeader.getQueueId();
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
 
+        // 客户端没指定 queueId（<0）时，Broker 随机挑一个写队列
         if (queueIdInt < 0) {
             queueIdInt = randomQueueId(topicConfig.getWriteQueueNums());
         }
-        //这里就是进行内部消息的处理（用MessageExtBrokerInner 来组装消息）
+        // Day3：把网络请求转成存储层认识的内部消息对象
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         msgInner.setTopic(requestHeader.getTopic());
         msgInner.setQueueId(queueIdInt);
@@ -312,10 +324,10 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         } else {
             msgInner.setPropertiesString(MessageDecoder.messageProperties2String(msgInner.getProperties()));
         }
-        //这里是JUC  future的运用
         CompletableFuture<PutMessageResult> putMessageResult = null;
         String transFlag = origProps.get(MessageConst.PROPERTY_TRANSACTION_PREPARED);
-        if (Boolean.parseBoolean(transFlag)) { //这里是一个事务消息的分支（第一次看源码，这里可以pass）
+        if (Boolean.parseBoolean(transFlag)) {
+            // Day8 事务消息分支：今天先跳过
             if (this.brokerController.getBrokerConfig().isRejectTransactionMessage()) {
                 response.setCode(ResponseCode.NO_PERMISSION);
                 response.setRemark(
@@ -324,7 +336,8 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 return CompletableFuture.completedFuture(response);
             }
             putMessageResult = this.brokerController.getTransactionalMessageService().asyncPrepareMessage(msgInner);
-        } else { //这里是普通消息的处理（主线）
+        } else {
+            // Day3主线：普通消息写入存储（进 DefaultMessageStore → CommitLog）
             putMessageResult = this.brokerController.getMessageStore().asyncPutMessage(msgInner);
         }
         return handlePutMessageResultFuture(putMessageResult, response, request, msgInner, responseHeader, mqtraceContext, ctx, queueIdInt);

@@ -446,6 +446,10 @@ public class DefaultMessageStore implements MessageStore {
     }
 
     @Override
+    /**
+     * Day3：存储门面入口。先做磁盘/消息合法性检查，再交给 CommitLog.asyncPutMessage。
+     * Day4 再深入 CommitLog 怎么落盘。
+     */
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner msg) {
         PutMessageStatus checkStoreStatus = this.checkStoreStatus();
         if (checkStoreStatus != PutMessageStatus.PUT_OK) {
@@ -464,7 +468,7 @@ public class DefaultMessageStore implements MessageStore {
 
 
         long beginTime = this.getSystemClock().now();
-        //这里就是把消息进行存储的核心方法了
+        // Day3终点 / Day4起点：真正追加写入 CommitLog
         CompletableFuture<PutMessageResult> putResultFuture = this.commitLog.asyncPutMessage(msg);
 
         putResultFuture.thenAccept(result -> {

@@ -84,18 +84,24 @@
 
 ## 4. 本地操作（今天最重要）
 
+> 源码里已加 `Day3` 中文注释，IDEA 全局搜 `Day3` 可跳转。
+
 ### 准备
 
 1. Debug 启 NameServer、Broker
-2. Example Producer 设置：`setNamesrvAddr("127.0.0.1:9876")`
-3. 建议先把 `MESSAGE_COUNT` 改成 `10`，方便跟断点
+2. Example Producer 已设置：`setNamesrvAddr("127.0.0.1:9876")`（`MESSAGE_COUNT` 已改成 10，方便跟断点）
+3. 建议断点：
+   - `DefaultMQProducerImpl.sendDefaultImpl`
+   - `DefaultMQProducerImpl.sendKernelImpl`
+   - `SendMessageProcessor.processRequest` / `asyncSendMessage`
+   - `DefaultMessageStore.asyncPutMessage`
 
 ### 断点建议（由外到内）
 
 1. `DefaultMQProducerImpl.sendDefaultImpl`（方法入口）
 2. `SendMessageProcessor.processRequest`
-3. `SendMessageProcessor.sendMessage` 或 `asyncSendMessage`
-4. `DefaultMessageStore.putMessage` / `asyncPutMessage`（进存储的大门）
+3. `SendMessageProcessor.asyncSendMessage`
+4. `DefaultMessageStore.asyncPutMessage`（进存储的大门，Day4 再往里）
 
 ### 操作步骤
 

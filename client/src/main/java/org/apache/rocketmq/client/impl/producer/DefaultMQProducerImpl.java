@@ -534,6 +534,11 @@ public class DefaultMQProducerImpl implements MQProducerInner {
 
     }
 
+    /**
+     * Day3：发送主流程（客户端核心）。
+     * 顺序：查路由 → 选队列 → sendKernelImpl 发到 Broker → 失败可换队列重试。
+     * communicationMode：SYNC 等结果 / ASYNC 回调 / ONEWAY 不管结果。
+     */
     private SendResult sendDefaultImpl(
         Message msg,
         final CommunicationMode communicationMode,
@@ -546,19 +551,20 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         long beginTimestampFirst = System.currentTimeMillis();
         long beginTimestampPrev = beginTimestampFirst;
         long endTimestamp = beginTimestampFirst;
-        //1、获取发送消息的路由信息（主题、队列、broker的ip和端口和映射关系）
+        // Day3-1：向 NameServer 查/刷新 Topic 路由（没有就会 No route info）
         TopicPublishInfo topicPublishInfo = this.tryToFindTopicPublishInfo(msg.getTopic());
         if (topicPublishInfo != null && topicPublishInfo.ok()) {
             boolean callTimeout = false;
             MessageQueue mq = null;
             Exception exception = null;
             SendResult sendResult = null;
+            // 同步发送才多重试；异步/单向默认只试 1 次
             int timesTotal = communicationMode == CommunicationMode.SYNC ? 1 + this.defaultMQProducer.getRetryTimesWhenSendFailed() : 1;
             int times = 0;
             String[] brokersSent = new String[timesTotal];
             for (; times < timesTotal; times++) {
                 String lastBrokerName = null == mq ? null : mq.getBrokerName();
-                //2、针对一条消息，选择一个队列进行发送
+                // Day3-2：选一个 MessageQueue（默认轮询，失败时尽量避开上次 Broker）
                 MessageQueue mqSelected = this.selectOneMessageQueue(topicPublishInfo, lastBrokerName);
                 if (mqSelected != null) {
                     mq = mqSelected;
@@ -575,6 +581,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                             break;
                         }
 
+                        // Day3-3：真正发网络请求到 Broker（看 Variables 里的 brokerAddr / queueId）
                         sendResult = this.sendKernelImpl(msg, mq, communicationMode, sendCallback, topicPublishInfo, timeout - costTime);
                         endTimestamp = System.currentTimeMillis();
                         this.updateFaultItem(mq.getBrokerName(), endTimestamp - beginTimestampPrev, false);
@@ -671,6 +678,10 @@ public class DefaultMQProducerImpl implements MQProducerInner {
             null).setResponseCode(ClientErrorCode.NOT_FOUND_TOPIC_EXCEPTION);
     }
 
+    /**
+     * Day3：本地没有路由或路由不完整时，去 NameServer 拉 TopicRouteData。
+     * 对应 Day1 的 GET_ROUTEINFO_BY_TOPIC → pickupTopicRouteData。
+     */
     private TopicPublishInfo tryToFindTopicPublishInfo(final String topic) {
         TopicPublishInfo topicPublishInfo = this.topicPublishInfoTable.get(topic);
         if (null == topicPublishInfo || !topicPublishInfo.ok()) {
@@ -688,6 +699,10 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         }
     }
 
+    /**
+     * Day3：已知目标队列后，拼请求并发到具体 Broker 地址。
+     * 这里之后才真正出网；Broker 端入口是 SendMessageProcessor。
+     */
     private SendResult sendKernelImpl(final Message msg,
         final MessageQueue mq,
         final CommunicationMode communicationMode,
@@ -695,6 +710,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         final TopicPublishInfo topicPublishInfo,
         final long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         long beginStartTime = System.currentTimeMillis();
+        // 根据 brokerName 找到 IP:PORT（来自之前缓存的路由）
         String brokerAddr = this.mQClientFactory.findBrokerAddressInPublish(mq.getBrokerName());
         if (null == brokerAddr) {
             tryToFindTopicPublishInfo(mq.getTopic());
@@ -1363,6 +1379,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
 
     public SendResult send(Message msg,
         long timeout) throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
+        // Day3：业务里 producer.send(msg) 最终走到这里，默认同步发送
         return this.sendDefaultImpl(msg, CommunicationMode.SYNC, null, timeout);
     }
 
