@@ -54,7 +54,9 @@ public class NamesrvStartup {
     public static NamesrvController main0(String[] args) {
 
         try {
+            // Day1：读配置、创建 NamesrvController（里面有 RouteInfoManager）
             NamesrvController controller = createNamesrvController(args);
+            // Day1：initialize + 启动 Netty，开始接收请求
             start(controller);
             String tip = "The Name Server boot success. serializeType=" + RemotingCommand.getSerializeTypeConfigInThisServer();
             log.info(tip);
@@ -137,6 +139,7 @@ public class NamesrvStartup {
             throw new IllegalArgumentException("NamesrvController is null");
         }
 
+        //初始化路由管理、KV 配置、Netty 服务端、注册请求处理器
         boolean initResult = controller.initialize();
         if (!initResult) {
             controller.shutdown();
@@ -148,6 +151,7 @@ public class NamesrvStartup {
             return null;
         }));
 
+        //启动 Netty，开始监听 `9876`
         controller.start();
 
         return controller;

@@ -49,6 +49,7 @@ public class NamesrvController {
     private final ScheduledExecutorService scheduledExecutorService = Executors.newSingleThreadScheduledExecutor(new ThreadFactoryImpl(
         "NSScheduledThread"));
     private final KVConfigManager kvConfigManager;
+    // Day1：路由核心，内存电话簿（集群/地址/Topic队列/心跳）
     private final RouteInfoManager routeInfoManager;
 
     private RemotingServer remotingServer;
@@ -77,13 +78,16 @@ public class NamesrvController {
 
         this.kvConfigManager.load();
 
+        // Day1：创建 Netty 服务端（默认监听 9876）
         this.remotingServer = new NettyRemotingServer(this.nettyServerConfig, this.brokerHousekeepingService);
 
         this.remotingExecutor =
             Executors.newFixedThreadPool(nettyServerConfig.getServerWorkerThreads(), new ThreadFactoryImpl("RemotingExecutorThread_"));
 
+        // Day1：挂上默认请求处理器（Broker注册、客户端查路由都从这里进）
         this.registerProcessor();
 
+        // Day1：定时扫描心跳超时 Broker（约120秒没心跳就摘掉）
         this.scheduledExecutorService.scheduleAtFixedRate(NamesrvController.this.routeInfoManager::scanNotActiveBroker, 5, 10, TimeUnit.SECONDS);
 
         this.scheduledExecutorService.scheduleAtFixedRate(NamesrvController.this.kvConfigManager::printAllPeriodically, 1, 10, TimeUnit.MINUTES);
@@ -135,12 +139,13 @@ public class NamesrvController {
             this.remotingServer.registerDefaultProcessor(new ClusterTestRequestProcessor(this, namesrvConfig.getProductEnvName()),
                 this.remotingExecutor);
         } else {
-
+            // Day1：正常路径。请求进来后进入 DefaultRequestProcessor.processRequest
             this.remotingServer.registerDefaultProcessor(new DefaultRequestProcessor(this), this.remotingExecutor);
         }
     }
 
     public void start() throws Exception {
+        // Day1：真正开始监听端口，接收 Broker/客户端请求
         this.remotingServer.start();
 
         if (this.fileWatchService != null) {

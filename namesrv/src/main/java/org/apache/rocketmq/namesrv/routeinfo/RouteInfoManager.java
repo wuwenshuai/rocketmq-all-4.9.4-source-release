@@ -52,11 +52,17 @@ import org.apache.rocketmq.remoting.common.RemotingUtil;
 
 public class RouteInfoManager {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.NAMESRV_LOGGER_NAME);
+    // Day1：Broker 心跳超时时间，默认 120 秒；超时会被 scanNotActiveBroker 摘掉
     private final static long BROKER_CHANNEL_EXPIRED_TIME = 1000 * 60 * 2;
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
+    // Day1四张路由表（NameServer 电话簿）：
+    // Topic -> (brokerName -> 队列信息)：客户端查路由先看这张
     private final HashMap<String/* topic */, Map<String /* brokerName */ , QueueData>> topicQueueTable;
+    // brokerName -> BrokerData(含 brokerId->地址)：找 IP 看这张
     private final HashMap<String/* brokerName */, BrokerData> brokerAddrTable;
+    // clusterName -> 有哪些 brokerName
     private final HashMap<String/* clusterName */, Set<String/* brokerName */>> clusterAddrTable;
+    // brokerAddr -> 上次心跳时间等存活信息
     private final HashMap<String/* brokerAddr */, BrokerLiveInfo> brokerLiveTable;
     private final HashMap<String/* brokerAddr */, List<String>/* Filter Server */> filterServerTable;
 
@@ -135,6 +141,11 @@ public class RouteInfoManager {
         return topicList;
     }
 
+    /**
+     * Day1主流程A：Broker 注册/心跳时改路由表。
+     * 顺序：写集群成员 → 写地址本 → Master更新Topic队列 → 盖心跳时间。
+     * Debug 时重点看：clusterName / brokerName / brokerAddr / brokerId。
+     */
     public RegisterBrokerResult registerBroker(
             final String clusterName,
             final String brokerAddr,
@@ -147,13 +158,18 @@ public class RouteInfoManager {
         RegisterBrokerResult result = new RegisterBrokerResult();
         try {
             try {
+                // 第0步：加写锁，保证多张表一起改时不会读到一半
                 this.lock.writeLock().lockInterruptibly();
 
+                // 第1步：clusterAddrTable 登记「这个集群里有这个 brokerName」
+                // 例：DefaultCluster -> {broker-a}
                 Set<String> brokerNames = this.clusterAddrTable.computeIfAbsent(clusterName, k -> new HashSet<>());
                 brokerNames.add(brokerName);
 
                 boolean registerFirst = false;
 
+                // 第2步：brokerAddrTable 登记「brokerName 对应哪些地址」
+                // 例：broker-a -> {0: 127.0.0.1:10911}
                 BrokerData brokerData = this.brokerAddrTable.get(brokerName);
                 if (null == brokerData) {
                     registerFirst = true;
@@ -163,6 +179,7 @@ public class RouteInfoManager {
                 Map<Long, String> brokerAddrsMap = brokerData.getBrokerAddrs();
                 //Switch slave to master: first remove <1, IP:PORT> in namesrv, then add <0, IP:PORT>
                 //The same IP:PORT must only have one record in brokerAddrTable
+                // 主从切换时，同一个 IP 不能同时挂两个不同 brokerId，先清脏数据
                 Iterator<Entry<Long, String>> it = brokerAddrsMap.entrySet().iterator();
                 while (it.hasNext()) {
                     Entry<Long, String> item = it.next();
@@ -172,6 +189,7 @@ public class RouteInfoManager {
                     }
                 }
 
+                // put 返回旧值；oldAddr==null 说明这个 brokerId 是第一次登记
                 String oldAddr = brokerData.getBrokerAddrs().put(brokerId, brokerAddr);
                 if (MixAll.MASTER_ID == brokerId) {
                     log.info("cluster [{}] brokerName [{}] master address change from {} to {}",
@@ -180,6 +198,8 @@ public class RouteInfoManager {
 
                 registerFirst = registerFirst || (null == oldAddr);
 
+                // 第3步：只有 Master(brokerId==0) 才更新 Topic 队列路由
+                // 且 Topic 配置版本变化，或首次注册，才真正刷 topicQueueTable
                 if (null != topicConfigWrapper
                         && MixAll.MASTER_ID == brokerId) {
                     if (this.isBrokerTopicConfigChanged(brokerAddr, topicConfigWrapper.getDataVersion())
@@ -188,12 +208,14 @@ public class RouteInfoManager {
                                 topicConfigWrapper.getTopicConfigTable();
                         if (tcTable != null) {
                             for (Map.Entry<String, TopicConfig> entry : tcTable.entrySet()) {
+                                // 写入 topicQueueTable[topic][brokerName] = QueueData
                                 this.createAndUpdateQueueData(brokerName, entry.getValue());
                             }
                         }
                     }
                 }
 
+                // 第4步：brokerLiveTable 盖心跳时间（证明还活着）
                 BrokerLiveInfo prevBrokerLiveInfo = this.brokerLiveTable.put(brokerAddr,
                         new BrokerLiveInfo(
                                 System.currentTimeMillis(),
@@ -201,6 +223,7 @@ public class RouteInfoManager {
                                 channel,
                                 haServerAddr));
                 if (null == prevBrokerLiveInfo) {
+                    // 第一次看到这个地址时会打这行日志
                     log.info("new broker registered, {} HAServer: {}", brokerAddr, haServerAddr);
                 }
 
@@ -212,6 +235,7 @@ public class RouteInfoManager {
                     }
                 }
 
+                // 第5步：如果是 Slave 来注册，把 Master 地址塞进返回结果给它
                 if (MixAll.MASTER_ID != brokerId) {
                     String masterAddr = brokerData.getBrokerAddrs().get(MixAll.MASTER_ID);
                     if (masterAddr != null) {
@@ -252,6 +276,10 @@ public class RouteInfoManager {
         }
     }
 
+    /**
+     * Day1：把 Broker 带来的 TopicConfig 转成 QueueData，写入 topicQueueTable。
+     * 例：TopicTest -> { broker-a -> QueueData(写8/读8) }
+     */
     private void createAndUpdateQueueData(final String brokerName, final TopicConfig topicConfig) {
         QueueData queueData = new QueueData();
         queueData.setBrokerName(brokerName);
@@ -406,6 +434,12 @@ public class RouteInfoManager {
         noBrokerRegisterTopic.forEach(topicQueueTable::remove);
     }
 
+    /**
+     * Day1主流程B：客户端按 Topic 查路由。
+     * 1) topicQueueTable 找队列
+     * 2) brokerAddrTable 补 IP
+     * 3) 两样都有才返回 TopicRouteData，否则返回 null
+     */
     public TopicRouteData pickupTopicRouteData(final String topic) {
         TopicRouteData topicRouteData = new TopicRouteData();
         boolean foundQueueData = false;
@@ -420,6 +454,7 @@ public class RouteInfoManager {
         try {
             try {
                 this.lock.readLock().lockInterruptibly();
+                // 1) 先按 Topic 拿队列信息：哪些 brokerName、几个读写队列
                 Map<String, QueueData> queueDataMap = this.topicQueueTable.get(topic);
                 if (queueDataMap != null) {
                     topicRouteData.setQueueDatas(new ArrayList<>(queueDataMap.values()));
@@ -427,6 +462,7 @@ public class RouteInfoManager {
 
                     brokerNameSet.addAll(queueDataMap.keySet());
 
+                    // 2) 再按 brokerName 去地址本找 IP（如 127.0.0.1:10911）
                     for (String brokerName : brokerNameSet) {
                         BrokerData brokerData = this.brokerAddrTable.get(brokerName);
                         if (null != brokerData) {
@@ -458,19 +494,25 @@ public class RouteInfoManager {
 
         log.debug("pickupTopicRouteData {} {}", topic, topicRouteData);
 
+        // 3) 队列信息和 Broker 地址都找到，才算路由完整
         if (foundBrokerData && foundQueueData) {
             return topicRouteData;
         }
 
+        // 返回 null → 上层会变成 No route info of this topic
         return null;
     }
 
+    /**
+     * Day1：定时任务调用。心跳超过 120 秒的 Broker 会被摘掉。
+     */
     public int scanNotActiveBroker() {
         int removeCount = 0;
         Iterator<Entry<String, BrokerLiveInfo>> it = this.brokerLiveTable.entrySet().iterator();
         while (it.hasNext()) {
             Entry<String, BrokerLiveInfo> next = it.next();
             long last = next.getValue().getLastUpdateTimestamp();
+            // lastUpdate + 120s < now  ⇒ 认为 Broker 已挂
             if ((last + BROKER_CHANNEL_EXPIRED_TIME) < System.currentTimeMillis()) {
                 RemotingUtil.closeChannel(next.getValue().getChannel());
                 it.remove();
