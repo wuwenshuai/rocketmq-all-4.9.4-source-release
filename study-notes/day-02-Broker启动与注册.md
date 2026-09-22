@@ -122,11 +122,16 @@ RocketMQ 常说的几种：
 
 ## 5. 本地操作
 
+> 源码里已加 `Day2` 中文注释，IDEA 全局搜 `Day2` 可跳转。
+
 ### 操作 A：观察启动断点
 
 1. 断点打在：
+   - `BrokerStartup.main` / `createBrokerController`
+   - `BrokerController.initialize`
    - `BrokerController.start`
    - `BrokerController.registerBrokerAll`
+   - `BrokerOuterAPI.registerBrokerAll`
 2. Debug 启动 Broker
 3. 单步看：先 `messageStore.start`，再网络 start，再注册
 

@@ -240,7 +240,12 @@ public class BrokerController {
         return queryThreadPoolQueue;
     }
 
+    /**
+     * Day2：初始化（还没 start）。
+     * 重点：加载本地配置 → 创建 MessageStore → 创建 NettyServer → registerProcessor。
+     */
     public boolean initialize() throws CloneNotSupportedException {
+        // 加载 Topic、消费位点、订阅组等本地配置（~/store/config）
         boolean result = this.topicConfigManager.load();
 
         result = result && this.consumerOffsetManager.load();
@@ -249,6 +254,7 @@ public class BrokerController {
 
         if (result) {
             try {
+                // Day2：创建存储引擎（CommitLog/ConsumeQueue 都在这里面）
                 this.messageStore =
                     new DefaultMessageStore(this.messageStoreConfig, this.brokerStatsManager, this.messageArrivingListener,
                         this.brokerConfig);
@@ -267,9 +273,11 @@ public class BrokerController {
             }
         }
 
+        // 加载磁盘上已有的 CommitLog / ConsumeQueue
         result = result && this.messageStore.load();
 
         if (result) {
+            // Day2：创建对外网络服务（默认 10911）以及 fast 端口（10911-2）
             this.remotingServer = new NettyRemotingServer(this.nettyServerConfig, this.clientHousekeepingService);
             NettyServerConfig fastConfig = (NettyServerConfig) this.nettyServerConfig.clone();
             fastConfig.setListenPort(nettyServerConfig.getListenPort() - 2);
@@ -346,6 +354,7 @@ public class BrokerController {
                 Executors.newFixedThreadPool(this.brokerConfig.getConsumerManageThreadPoolNums(), new ThreadFactoryImpl(
                     "ConsumerManageThread_"));
 
+            // Day2：把 Send/Pull 等 Processor 挂到 Netty（请求码 → 处理器）
             this.registerProcessor();
 
             final long initialDelay = UtilAll.computeNextMorningTimeMillis() - System.currentTimeMillis();
@@ -541,6 +550,10 @@ public class BrokerController {
         }
     }
 
+    /**
+     * Day2：注册请求处理器。今天先知道「发送/拉取请求会进这些 Processor」即可，
+     * Day3 再深入 SendMessageProcessor。
+     */
     public void registerProcessor() {
         /**
          * SendMessageProcessor
@@ -549,7 +562,7 @@ public class BrokerController {
         sendProcessor.registerSendMessageHook(sendMessageHookList);
         sendProcessor.registerConsumeMessageHook(consumeMessageHookList);
 
-        this.remotingServer.registerPr  ocessor(RequestCode.SEND_MESSAGE, sendProcessor, this.sendMessageExecutor);
+        this.remotingServer.registerProcessor(RequestCode.SEND_MESSAGE, sendProcessor, this.sendMessageExecutor);
         this.remotingServer.registerProcessor(RequestCode.SEND_MESSAGE_V2, sendProcessor, this.sendMessageExecutor);
         this.remotingServer.registerProcessor(RequestCode.SEND_BATCH_MESSAGE, sendProcessor, this.sendMessageExecutor);
         this.remotingServer.registerProcessor(RequestCode.CONSUMER_SEND_MSG_BACK, sendProcessor, this.sendMessageExecutor);
@@ -847,14 +860,22 @@ public class BrokerController {
     }
 
     public String getBrokerAddr() {
+        // Day2：对外广播的 Broker 地址 = brokerIP1 + listenPort
+        // 本地必须是 127.0.0.1:10911，否则客户端可能连不上网卡 IP
         return this.brokerConfig.getBrokerIP1() + ":" + this.nettyServerConfig.getListenPort();
     }
 
+    /**
+     * Day2主流程：Broker 真正对外服务。
+     * 顺序：启动存储 → 启动网络 → 立刻向 NameServer 注册 → 定时心跳注册。
+     */
     public void start() throws Exception {
+        // 1) 启动存储（刷盘、Reput 建索引等后台线程会起来）
         if (this.messageStore != null) {
             this.messageStore.start();
         }
 
+        // 2) 启动网络，开始监听 10911
         if (this.remotingServer != null) {
             this.remotingServer.start();
         }
@@ -867,6 +888,7 @@ public class BrokerController {
             this.fileWatchService.start();
         }
 
+        // 3) 启动访问 NameServer 的客户端
         if (this.brokerOuterAPI != null) {
             this.brokerOuterAPI.start();
         }
@@ -886,9 +908,11 @@ public class BrokerController {
         if (!messageStoreConfig.isEnableDLegerCommitLog()) {
             startProcessorByHa(messageStoreConfig.getBrokerRole());
             handleSlaveSynchronize(messageStoreConfig.getBrokerRole());
+            // 4) Day2核心：启动后立刻向所有 NameServer 注册一次
             this.registerBrokerAll(true, false, true);
         }
 
+        // 5) 之后定时再注册（心跳，默认大约几十秒一次，受 registerNameServerPeriod 限制）
         this.scheduledExecutorService.scheduleAtFixedRate(new Runnable() {
 
             @Override
@@ -930,7 +954,12 @@ public class BrokerController {
         doRegisterBrokerAll(true, false, topicConfigSerializeWrapper);
     }
 
+    /**
+     * Day2：组装要上报给 NameServer 的 Topic 配置，并决定是否真的发注册请求。
+     * forceRegister=true：启动时强制注册；定时任务里可能先 needRegister 判断。
+     */
     public synchronized void registerBrokerAll(final boolean checkOrderConfig, boolean oneway, boolean forceRegister) {
+        // 把本 Broker 的 Topic 配置打成可序列化包，带给 NameServer
         TopicConfigSerializeWrapper topicConfigWrapper = this.getTopicConfigManager().buildTopicConfigSerializeWrapper();
 
         if (!PermName.isWriteable(this.getBrokerConfig().getBrokerPermission())
@@ -945,6 +974,7 @@ public class BrokerController {
             topicConfigWrapper.setTopicConfigTable(topicConfigTable);
         }
 
+        // 强制注册，或 NameServer 侧 Topic 版本有变化，才真正发送
         if (forceRegister || needRegister(this.brokerConfig.getBrokerClusterName(),
             this.getBrokerAddr(),
             this.brokerConfig.getBrokerName(),
@@ -956,6 +986,7 @@ public class BrokerController {
 
     private void doRegisterBrokerAll(boolean checkOrderConfig, boolean oneway,
         TopicConfigSerializeWrapper topicConfigWrapper) {
+        // Day2：真正发到 NameServer（可能有多台，BrokerOuterAPI 会逐个/并行注册）
         List<RegisterBrokerResult> registerBrokerResultList = this.brokerOuterAPI.registerBrokerAll(
             this.brokerConfig.getBrokerClusterName(),
             this.getBrokerAddr(),

@@ -53,13 +53,18 @@ public class BrokerStartup {
     public static String configFile = null;
     public static InternalLogger log;
 
+    /**
+     * Day2：Broker 进程入口。
+     * 1) createBrokerController：解析 -n/-c，创建控制器并 initialize
+     * 2) start：真正启动存储、网络，并向 NameServer 注册
+     */
     public static void main(String[] args) {
         start(createBrokerController(args));
     }
 
     public static BrokerController start(BrokerController controller) {
         try {
-
+            // Day2：进入 BrokerController.start（存储 → 网络 → registerBrokerAll）
             controller.start();
 
             String tip = "The broker[" + controller.getBrokerConfig().getBrokerName() + ", "
@@ -91,6 +96,7 @@ public class BrokerStartup {
 
         try {
             //PackageConflictDetect.detectFastjson();
+            // Day2：解析命令行。本地常用：-n 127.0.0.1:9876  -c conf/broker-local.conf
             Options options = ServerUtil.buildCommandlineOptions(new Options());
             commandLine = ServerUtil.parseCmdLine("mqbroker", args, buildCommandlineOptions(options),
                 new PosixParser());
@@ -104,6 +110,7 @@ public class BrokerStartup {
 
             nettyClientConfig.setUseTLS(Boolean.parseBoolean(System.getProperty(TLS_ENABLE,
                 String.valueOf(TlsSystemConfig.tlsMode == TlsMode.ENFORCING))));
+            // Day2：Broker 默认监听 10911（收 Producer/Consumer 请求）
             nettyServerConfig.setListenPort(10911);
             final MessageStoreConfig messageStoreConfig = new MessageStoreConfig();
 
@@ -112,6 +119,7 @@ public class BrokerStartup {
                 messageStoreConfig.setAccessMessageInMemoryMaxRatio(ratio);
             }
 
+            // Day2：-c 指定配置文件（brokerIP1、brokerName、clusterName 等）
             if (commandLine.hasOption('c')) {
                 String file = commandLine.getOptionValue('c');
                 if (file != null) {
@@ -217,6 +225,7 @@ public class BrokerStartup {
             // remember all configs to prevent discard
             controller.getConfiguration().registerConfig(properties);
 
+            // Day2：加载 Topic/位点配置、创建 MessageStore、注册各种 Processor（还没对外服务）
             boolean initResult = controller.initialize();
             if (!initResult) {
                 controller.shutdown();

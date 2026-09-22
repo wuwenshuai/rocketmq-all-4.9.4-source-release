@@ -75,6 +75,7 @@ public class BrokerOuterAPI {
     }
 
     public void start() {
+        // Day2：启动访问 NameServer 的 Netty 客户端
         this.remotingClient.start();
     }
 
@@ -110,6 +111,11 @@ public class BrokerOuterAPI {
         this.remotingClient.updateNameServerAddressList(lst);
     }
 
+    /**
+     * Day2：向「所有」NameServer 注册本 Broker。
+     * NameServer 之间不互相同步，所以 Broker 必须自己挨个注册。
+     * 注册成功后，NameServer 的 RouteInfoManager.registerBroker 才会改路由表。
+     */
     public List<RegisterBrokerResult> registerBrokerAll(
         final String clusterName,
         final String brokerAddr,
@@ -126,6 +132,7 @@ public class BrokerOuterAPI {
         List<String> nameServerAddressList = this.remotingClient.getNameServerAddressList();
         if (nameServerAddressList != null && nameServerAddressList.size() > 0) {
 
+            // 请求头：告诉 NameServer 我是谁、地址是啥
             final RegisterBrokerRequestHeader requestHeader = new RegisterBrokerRequestHeader();
             requestHeader.setBrokerAddr(brokerAddr);
             requestHeader.setBrokerId(brokerId);
@@ -134,6 +141,7 @@ public class BrokerOuterAPI {
             requestHeader.setHaServerAddr(haServerAddr);
             requestHeader.setCompressed(compressed);
 
+            // 请求体：带上 Topic 配置包（NameServer 用来更新 topicQueueTable）
             RegisterBrokerBody requestBody = new RegisterBrokerBody();
             requestBody.setTopicConfigSerializeWrapper(topicConfigWrapper);
             requestBody.setFilterServerList(filterServerList);
@@ -141,6 +149,7 @@ public class BrokerOuterAPI {
             final int bodyCrc32 = UtilAll.crc32(body);
             requestHeader.setBodyCrc32(bodyCrc32);
             final CountDownLatch countDownLatch = new CountDownLatch(nameServerAddressList.size());
+            // 并行向每台 NameServer 发 REGISTER_BROKER
             for (final String namesrvAddr : nameServerAddressList) {
                 brokerOuterExecutor.execute(() -> {
                     try {
@@ -167,6 +176,10 @@ public class BrokerOuterAPI {
         return registerBrokerResultList;
     }
 
+    /**
+     * Day2：对单台 NameServer 发 REGISTER_BROKER 请求。
+     * 对端进入：DefaultRequestProcessor → RouteInfoManager.registerBroker
+     */
     private RegisterBrokerResult registerBroker(
         final String namesrvAddr,
         final boolean oneway,
@@ -187,6 +200,7 @@ public class BrokerOuterAPI {
             return null;
         }
 
+        // 同步等待 NameServer 返回（里面可能带 masterAddr / haServerAddr）
         RemotingCommand response = this.remotingClient.invokeSync(namesrvAddr, request, timeoutMills);
         assert response != null;
         switch (response.getCode()) {
