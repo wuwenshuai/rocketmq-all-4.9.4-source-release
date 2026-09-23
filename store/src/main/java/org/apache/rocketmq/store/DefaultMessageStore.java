@@ -447,8 +447,8 @@ public class DefaultMessageStore implements MessageStore {
 
     @Override
     /**
-     * Day3：存储门面入口。先做磁盘/消息合法性检查，再交给 CommitLog.asyncPutMessage。
-     * Day4 再深入 CommitLog 怎么落盘。
+     * Day3+Day4：存储门面。校验通过后进入 CommitLog.asyncPutMessage（落盘主战场）。
+     * 写进 CommitLog 后，ReputMessageService 会异步建 ConsumeQueue（今天知道有这步，细节 Day5）。
      */
     public CompletableFuture<PutMessageResult> asyncPutMessage(MessageExtBrokerInner msg) {
         PutMessageStatus checkStoreStatus = this.checkStoreStatus();
@@ -468,7 +468,7 @@ public class DefaultMessageStore implements MessageStore {
 
 
         long beginTime = this.getSystemClock().now();
-        // Day3终点 / Day4起点：真正追加写入 CommitLog
+        // Day4 主线入口：CommitLog 顺序追加 + 刷盘/复制
         CompletableFuture<PutMessageResult> putResultFuture = this.commitLog.asyncPutMessage(msg);
 
         putResultFuture.thenAccept(result -> {
@@ -563,6 +563,11 @@ public class DefaultMessageStore implements MessageStore {
         return commitLog;
     }
 
+    /**
+     * Day5：Broker 拉消息读存储核心。
+     * 流程：找 ConsumeQueue → getIndexBuffer(queueOffset) → 读出 phyOffset/size → 再读 CommitLog。
+     * 没消息时上层 PullMessageProcessor 可挂起长轮询。
+     */
     public GetMessageResult getMessage(final String group, final String topic, final int queueId, final long offset,
         final int maxMsgNums,
         final MessageFilter messageFilter) {
@@ -593,6 +598,7 @@ public class DefaultMessageStore implements MessageStore {
 
         final long maxOffsetPy = this.commitLog.getMaxOffset();
 
+        // Day5-1：先定位该 topic-queue 的 ConsumeQueue（索引）
         ConsumeQueue consumeQueue = findConsumeQueue(topic, queueId);
         if (consumeQueue != null) {
             minOffset = consumeQueue.getMinOffsetInQueue();
@@ -605,12 +611,14 @@ public class DefaultMessageStore implements MessageStore {
                 status = GetMessageStatus.OFFSET_TOO_SMALL;
                 nextBeginOffset = nextOffsetCorrection(offset, minOffset);
             } else if (offset == maxOffset) {
+                // Day5：offset 正好等于 max → 暂时没新消息（长轮询常见）
                 status = GetMessageStatus.OFFSET_OVERFLOW_ONE;
                 nextBeginOffset = nextOffsetCorrection(offset, offset);
             } else if (offset > maxOffset) {
                 status = GetMessageStatus.OFFSET_OVERFLOW_BADLY;
                 nextBeginOffset = nextOffsetCorrection(offset, maxOffset);
             } else {
+                // Day5-2：从逻辑偏移读索引 buffer
                 SelectMappedBufferResult bufferConsumeQueue = consumeQueue.getIndexBuffer(offset);
                 if (bufferConsumeQueue != null) {
                     try {
@@ -627,6 +635,7 @@ public class DefaultMessageStore implements MessageStore {
 
                         ConsumeQueueExt.CqExtUnit cqExtUnit = new ConsumeQueueExt.CqExtUnit();
                         for (; i < bufferConsumeQueue.getSize() && i < maxFilterMessageCount; i += ConsumeQueue.CQ_STORE_UNIT_SIZE) {
+                            // Day5-3：拆一条索引 → 物理偏移 / 大小 / tags，再去 CommitLog 取消息体
                             long offsetPy = bufferConsumeQueue.getByteBuffer().getLong();
                             int sizePy = bufferConsumeQueue.getByteBuffer().getInt();
                             long tagsCode = bufferConsumeQueue.getByteBuffer().getLong();
@@ -1541,12 +1550,19 @@ public class DefaultMessageStore implements MessageStore {
         return runningFlags;
     }
 
+    /**
+     * Day4 尾巴 / Day5 入口：把 CommitLog 里解析出的 DispatchRequest 分发给各 Dispatcher
+     * （建 ConsumeQueue、建 Index 等）。
+     */
     public void doDispatch(DispatchRequest req) {
         for (CommitLogDispatcher dispatcher : this.dispatcherList) {
             dispatcher.dispatch(req);
         }
     }
 
+    /**
+     * Day4/5：按 topic+queueId 找到 ConsumeQueue，写入「物理偏移+size+tagsCode」索引项。
+     */
     public void putMessagePositionInfo(DispatchRequest dispatchRequest) {
         ConsumeQueue cq = this.findConsumeQueue(dispatchRequest.getTopic(), dispatchRequest.getQueueId());
         cq.putMessagePositionInfoWrapper(dispatchRequest, checkMultiDispatchQueue(dispatchRequest));
@@ -1640,6 +1656,7 @@ public class DefaultMessageStore implements MessageStore {
         }, 6, TimeUnit.SECONDS);
     }
 
+    /** Day4/5：从 CommitLog 派发请求，写入对应 ConsumeQueue 索引 */
     class CommitLogDispatcherBuildConsumeQueue implements CommitLogDispatcher {
 
         @Override
@@ -1994,6 +2011,10 @@ public class DefaultMessageStore implements MessageStore {
         }
     }
 
+    /**
+     * Day4 收尾 / Day5 主线：后台线程从 CommitLog 顺序「重放」已写入消息，
+     * 调用 doDispatch → 建 ConsumeQueue / Index。写消息本身不直接写 CQ，所以消费能看到有短暂落后。
+     */
     class ReputMessageService extends ServiceThread {
 
         private volatile long reputFromOffset = 0;
@@ -2031,13 +2052,16 @@ public class DefaultMessageStore implements MessageStore {
             return this.reputFromOffset < DefaultMessageStore.this.commitLog.getMaxOffset();
         }
 
-        private void doReput() {//这个方法就是 主题队列构建的核心方法
+        /**
+         * Day4/5：从 reputFromOffset 起读 CommitLog，解析每条消息并 doDispatch。
+         */
+        private void doReput() {
             if (this.reputFromOffset < DefaultMessageStore.this.commitLog.getMinOffset()) {
                 log.warn("The reputFromOffset={} is smaller than minPyOffset={}, this usually indicate that the dispatch behind too much and the commitlog has expired.",
                     this.reputFromOffset, DefaultMessageStore.this.commitLog.getMinOffset());
                 this.reputFromOffset = DefaultMessageStore.this.commitLog.getMinOffset();
             }
-            //循环读取每一条消息（在 commitlog中）
+            // Day4：循环推进，直到追上 CommitLog 最大物理偏移
             for (boolean doNext = true; this.isCommitLogAvailable() && doNext; ) {
 
                 if (DefaultMessageStore.this.getMessageStoreConfig().isDuplicationEnable()
@@ -2057,7 +2081,7 @@ public class DefaultMessageStore implements MessageStore {
 
                             if (dispatchRequest.isSuccess()) {
                                 if (size > 0) {
-                                    //doDispatch 这个方法就是来构建 主题队列索引消息
+                                    // Day4→Day5：构建 ConsumeQueue 索引 + 通知长轮询有新消息
                                     DefaultMessageStore.this.doDispatch(dispatchRequest);
 
                                     if (BrokerRole.SLAVE != DefaultMessageStore.this.getMessageStoreConfig().getBrokerRole()

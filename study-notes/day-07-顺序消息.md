@@ -71,13 +71,15 @@ Broker 侧也有队列锁相关逻辑（消费者锁定 MessageQueue），避免
 
 ## 4. 本地操作
 
+> 源码里已加 `Day7` 中文注释，IDEA 全局搜 `Day7` 可跳转。
+
 ### 操作 A：跑官方顺序示例
 
-1. 打开并设置 namesrv：
-   - `example/.../ordermessage/Producer.java`
+1. 打开并设置 namesrv（示例已打开）：
+   - `example/.../ordermessage/Producer.java`（Topic=`OrderTopic`）
    - `example/.../ordermessage/Consumer.java`
 2. 先启 Consumer，再启 Producer
-3. 观察控制台：同一 `orderId` 的消息是否按顺序出现
+3. 观察控制台：同一 `orderId`（KEY）的消息是否按顺序出现
 
 ### 操作 B：对比普通并发消费
 
@@ -87,9 +89,9 @@ Broker 侧也有队列锁相关逻辑（消费者锁定 MessageQueue），避免
 
 ### 操作 C：断点
 
-1. Producer 选择队列处（`MessageQueueSelector.select`）
-2. `ConsumeMessageOrderlyService` 消费执行处
-3. 看同一队列是否被锁住串行处理
+1. `MessageQueueSelector.select` / `DefaultMQProducerImpl.sendSelectImpl`
+2. `ConsumeMessageOrderlyService.lockMQPeriodically` / `lockOneMQ`
+3. `ConsumeRequest.run` 里 `processQueue.getConsumeLock()` + `messageListener.consumeMessage`
 
 ---
 

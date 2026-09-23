@@ -49,6 +49,9 @@ import org.apache.rocketmq.common.utils.ThreadUtils;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 
+/**
+ * Day5：并发消费服务。Pull 到的消息提交到线程池执行业务 Listener，再根据结果更新位点/重试。
+ */
 public class ConsumeMessageConcurrentlyService implements ConsumeMessageService {
     private static final InternalLogger log = ClientLogger.getLog();
     private final DefaultMQPushConsumerImpl defaultMQPushConsumerImpl;
@@ -188,6 +191,9 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
         return result;
     }
 
+    /**
+     * Day5：把一批消息丢进消费线程池（batch 过大则拆开提交）。
+     */
     @Override
     public void submitConsumeRequest(
         final List<MessageExt> msgs,
@@ -238,6 +244,10 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
         }
     }
 
+    /**
+     * Day5+Day6：业务 Listener 返回后处理。
+     * SUCCESS → 推进本地 offset；失败 → sendMessageBack 进重试；最后 updateOffset（可能触发重复消费，需幂等）。
+     */
     public void processConsumeResult(
         final ConsumeConcurrentlyStatus status,
         final ConsumeConcurrentlyContext context,
@@ -295,6 +305,7 @@ public class ConsumeMessageConcurrentlyService implements ConsumeMessageService 
                 break;
         }
 
+        // Day6：从 ProcessQueue 移除已处理消息，得到新的消费进度并写入 OffsetStore
         long offset = consumeRequest.getProcessQueue().removeMessage(consumeRequest.getMsgs());
         if (offset >= 0 && !consumeRequest.getProcessQueue().isDropped()) {
             this.defaultMQPushConsumerImpl.getOffsetStore().updateOffset(consumeRequest.getMessageQueue(), offset, true);

@@ -24,6 +24,7 @@ import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 
 /**
  * This example shows how to subscribe and consume messages using providing {@link DefaultMQPushConsumer}.
+ * Day5/6：本地调试入口。设 namesrvAddr 后，跟断点 pullMessage / doRebalance。
  */
 public class Consumer {
 
@@ -35,6 +36,7 @@ public class Consumer {
 
         /*
          * Instantiate with specified consumer group name.
+         * Day6：同组多实例会重平衡分队列；不同组互不影响各收全量。
          */
         DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(CONSUMER_GROUP);
 
@@ -49,8 +51,8 @@ public class Consumer {
          * }
          * </pre>
          */
-        // Uncomment the following line while debugging, namesrvAddr should be set to your local address
-//        consumer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
+        // Day5：本地调试必须打开，否则不知道去哪拉路由
+        consumer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
 
         /*
          * Specify where to start in case the specific consumer group is a brand-new one.
@@ -64,14 +66,17 @@ public class Consumer {
 
         /*
          *  Register callback to execute on arrival of messages fetched from brokers.
+         * Day5：看起来像 Push 回调，实际是客户端拉到消息后线程池调用这里。
          */
         consumer.registerMessageListener((MessageListenerConcurrently) (msg, context) -> {
             System.out.printf("%s Receive New Messages: %s %n", Thread.currentThread().getName(), msg);
+            // Day6 练堆积时可故意 Thread.sleep(2000)，再用 mqadmin consumerProgress 看 diff
             return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
         });
 
         /*
          *  Launch the consumer instance.
+         * Day5 start → 注册 + 拉服务；Day6 随后 doRebalance 分到队列才开始真正 pull。
          */
         consumer.start();
 

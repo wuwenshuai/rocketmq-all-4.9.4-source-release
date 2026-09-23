@@ -66,12 +66,13 @@
 
 ## 4. 本地操作
 
+> 源码里已加 `Day9` 中文注释，IDEA 全局搜 `Day9` 可跳转。
+
 ### 操作 A：跑延时示例
 
-1. 打开 `ScheduledMessageProducer`，设置 `namesrvAddr`
-2. 看代码里 `setDelayTimeLevel(...)` 用的等级
-3. 先启 `ScheduledMessageConsumer`
-4. 再启 Producer，看表计时：消息是否明显晚到
+1. 打开 `ScheduledMessageProducer`（已设 namesrv，`setDelayTimeLevel(3)` ≈ 10s）
+2. 先启 `ScheduledMessageConsumer`
+3. 再启 Producer，看表计时：消息是否明显晚到（打印 `ms later`）
 
 ### 操作 B：看内部调度 Topic
 
@@ -84,9 +85,10 @@ sh bin/mqadmin topicList -n 127.0.0.1:9876 | grep -i schedule
 
 ### 操作 C：断点
 
-1. `ScheduleMessageService.start`
-2. `DeliverDelayedMessageTimerTask.executeOnTimeup`
-3. `messageTimeup`
+1. `CommitLog.asyncPutMessage` 里 delayLevel 改写 SCHEDULE_TOPIC
+2. `ScheduleMessageService.start` / `parseDelayLevel`
+3. `DeliverDelayedMessageTimerTask.executeOnTimeup`
+4. `messageTimeup`
 
 发一条 delay level 较小的消息（例如 1～3 级），更容易等到断点。
 

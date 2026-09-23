@@ -79,24 +79,27 @@ RocketMQ 事务消息给了一个折中方案（最终一致）：
 
 ## 4. 本地操作
 
+> 源码里已加 `Day8` 中文注释，IDEA 全局搜 `Day8` 可跳转。
+
 ### 操作 A：跑事务示例
 
 1. NameServer + Broker 先起来
-2. `TransactionListenerImpl` 里看三种返回值分支（成功/失败/未知）
-3. 先启一个普通 Consumer 订阅事务示例 Topic（示例里 topic 名以代码为准）
-4. 再跑 `TransactionProducer`
-5. 观察：本地事务失败时，消费者收不到；成功时收得到
+2. `TransactionListenerImpl` 里看三种返回值分支（成功/失败/未知）；示例先返回 UNKNOWN 方便回查
+3. 先启一个普通 Consumer 订阅 `TopicTest1234`
+4. 再跑 `TransactionProducer`（已设 namesrv）
+5. 观察：回查后 COMMIT 的能收到，ROLLBACK 的收不到
 
 ### 操作 B：制造回查
 
-在 `executeLocalTransaction` 返回 `UNKNOW`（或让它超时不二次确认），观察 Broker 是否回调 `checkLocalTransaction`。  
+在 `executeLocalTransaction` 返回 `UNKNOW`（示例已如此），观察 Broker 是否回调 `checkLocalTransaction`。  
 可在这两个方法打断点。
 
 ### 操作 C：断点
 
-1. `TransactionListenerImpl.executeLocalTransaction`
-2. `TransactionalMessageServiceImpl.prepareMessage`
-3. `TransactionalMessageServiceImpl.check`
+1. `DefaultMQProducerImpl.sendMessageInTransaction` / `endTransaction`
+2. `TransactionListenerImpl.executeLocalTransaction` / `checkLocalTransaction`
+3. `SendMessageProcessor` 里 `asyncPrepareMessage` 分支
+4. `TransactionalMessageServiceImpl.prepareMessage` / `check`
 
 ---
 

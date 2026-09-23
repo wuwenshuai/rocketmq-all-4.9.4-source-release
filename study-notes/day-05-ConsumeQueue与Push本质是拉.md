@@ -111,6 +111,8 @@ Consumer 线程循环：
 
 ## 4. 本地操作
 
+> 源码里已加 `Day5` 中文注释，IDEA 全局搜 `Day5` 可跳转。
+
 ### 操作 A：先看磁盘索引
 
 1. 确保之前发过消息到 `TopicTest`
@@ -121,18 +123,21 @@ find ~/store/consumequeue -type f | head -20
 ls -l ~/store/consumequeue/TopicTest 2>/dev/null || ls ~/store/consumequeue | head
 ```
 
-### 操作 B：断点看拉消息
+### 操作 B：断点看拉消息（由外到内）
 
-1. Consumer 设置 `namesrvAddr=127.0.0.1:9876`
-2. 断点：
+1. Consumer 已设置 `namesrvAddr=127.0.0.1:9876`（quickstart/Consumer）
+2. 建议断点：
+   - `PullMessageService.run`（take PullRequest）
    - `DefaultMQPushConsumerImpl.pullMessage`
-   - `PullMessageProcessor.processRequest`
-3. 先启 Consumer（Debug），再启 Producer 发几条
-4. 观察请求里的 `queueOffset`、返回的消息条数
+   - `PullMessageProcessor.processRequest`（长轮询看 PULL_NOT_FOUND 分支）
+   - `DefaultMessageStore.getMessage` / `ConsumeQueue.getIndexBuffer`
+   - `ConsumeMessageConcurrentlyService.submitConsumeRequest`
+3. 先 Debug 启 Consumer，再启 Producer 发几条
+4. 观察：`queueOffset`、`getMessageResult`、回调里的消息列表
 
 ### 操作 C：体会长轮询
 
-Consumer 挂着但先不发消息：你的 `pullMessage` 可能隔一段时间才返回空/超时再拉。  
+Consumer 挂着但先不发消息：`pullMessage` 可能隔一段时间才返回空/超时再拉。  
 然后突然发消息，很快就有回调消费日志。
 
 ---

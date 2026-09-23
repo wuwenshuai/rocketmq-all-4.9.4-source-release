@@ -21,7 +21,8 @@ import java.util.List;
 import org.apache.rocketmq.common.message.MessageQueue;
 
 /**
- * Average Hashing queue algorithm
+ * Day6：默认队列分配策略——平均分配。
+ * 例：4 队列 2 消费者 → 每人 2 个；4 队列 5 消费者 → 有人分到 0 个（闲着）。
  */
 public class AllocateMessageQueueAveragely extends AbstractAllocateMessageQueueStrategy {
 
@@ -34,6 +35,7 @@ public class AllocateMessageQueueAveragely extends AbstractAllocateMessageQueueS
             return result;
         }
 
+        // Day6：按自己在 cid 列表中的下标切一段连续队列
         int index = cidAll.indexOf(currentCID);
         int mod = mqAll.size() % cidAll.size();
         int averageSize =

@@ -52,6 +52,15 @@ import org.apache.rocketmq.store.PutMessageStatus;
 import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.config.StorePathConfigHelper;
 
+/**
+ * Day9：延时消息调度服务（4.x 固定 delay level）。
+ * <pre>
+ *   发送带 delayLevel → CommitLog 改写到 SCHEDULE_TOPIC_XXXX 对应队列
+ *   → 本服务定时扫描到期 → messageTimeup 恢复真实 Topic → 再 put 一次
+ *   → 消费者这时才能拉到
+ * </pre>
+ * 默认 18 级（1s/5s/10s…），不是任意时间。
+ */
 public class ScheduleMessageService extends ConfigManager {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
@@ -61,9 +70,11 @@ public class ScheduleMessageService extends ConfigManager {
     private static final long WAIT_FOR_SHUTDOWN = 5000L;
     private static final long DELAY_FOR_A_SLEEP = 10L;
 
+    /** Day9：level → 延迟毫秒数（parseDelayLevel 填入） */
     private final ConcurrentMap<Integer /* level */, Long/* delay timeMillis */> delayLevelTable =
         new ConcurrentHashMap<Integer, Long>(32);
 
+    /** Day9：每个 level 消费到调度队列的哪个 offset */
     private final ConcurrentMap<Integer /* level */, Long/* offset */> offsetTable =
         new ConcurrentHashMap<Integer, Long>(32);
     private final DefaultMessageStore defaultMessageStore;
@@ -125,6 +136,9 @@ public class ScheduleMessageService extends ConfigManager {
         return storeTimestamp + 1000;
     }
 
+    /**
+     * Day9：启动后为每个 delay level 起一个 DeliverDelayedMessageTimerTask。
+     */
     public void start() {
         if (started.compareAndSet(false, true)) {
             this.load();
@@ -144,6 +158,7 @@ public class ScheduleMessageService extends ConfigManager {
                     if (this.enableAsyncDeliver) {
                         this.handleExecutorService.schedule(new HandlePutResultTask(level), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
                     }
+                    // Day9：每个等级一条定时投递任务
                     this.deliverExecutorService.schedule(new DeliverDelayedMessageTimerTask(level, offset), FIRST_DELAY_TIME, TimeUnit.MILLISECONDS);
                 }
             }
@@ -273,6 +288,10 @@ public class ScheduleMessageService extends ConfigManager {
         return delayOffsetSerializeWrapper.toJson(prettyFormat);
     }
 
+    /**
+     * Day9：解析配置 messageDelayLevel（如 "1s 5s 10s 30s 1m ..."）填入 delayLevelTable。
+     * level 从 1 开始；示例里 setDelayTimeLevel(3) 通常对应 10s。
+     */
     public boolean parseDelayLevel() {
         HashMap<String, Long> timeUnitTable = new HashMap<String, Long>();
         timeUnitTable.put("s", 1000L);
@@ -308,6 +327,9 @@ public class ScheduleMessageService extends ConfigManager {
         return true;
     }
 
+    /**
+     * Day9：到期后把调度消息还原成真实 Topic/Queue（清掉 delay 属性），再写入 CommitLog。
+     */
     private MessageExtBrokerInner messageTimeup(MessageExt msgExt) {
         MessageExtBrokerInner msgInner = new MessageExtBrokerInner();
         msgInner.setBody(msgExt.getBody());
@@ -329,6 +351,7 @@ public class ScheduleMessageService extends ConfigManager {
         msgInner.setWaitStoreMsgOK(false);
         MessageAccessor.clearProperty(msgInner, MessageConst.PROPERTY_DELAY_TIME_LEVEL);
 
+        // Day9：恢复发送时备份的真实 topic / queueId
         msgInner.setTopic(msgInner.getProperty(MessageConst.PROPERTY_REAL_TOPIC));
 
         String queueIdStr = msgInner.getProperty(MessageConst.PROPERTY_REAL_QUEUE_ID);
@@ -338,6 +361,9 @@ public class ScheduleMessageService extends ConfigManager {
         return msgInner;
     }
 
+    /**
+     * Day9：某个 delay level 的定时投递任务。扫 SCHEDULE_TOPIC 对应队列，到期则 messageTimeup + put。
+     */
     class DeliverDelayedMessageTimerTask implements Runnable {
         private final int delayLevel;
         private final long offset;
@@ -375,6 +401,9 @@ public class ScheduleMessageService extends ConfigManager {
             return result;
         }
 
+        /**
+         * Day9：扫描本 level 对应 ConsumeQueue；未到期则推迟调度；到期则还原并投递。
+         */
         public void executeOnTimeup() {
             ConsumeQueue cq =
                 ScheduleMessageService.this.defaultMessageStore.findConsumeQueue(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
@@ -429,6 +458,7 @@ public class ScheduleMessageService extends ConfigManager {
 
                     long countdown = deliverTimestamp - now;
                     if (countdown > 0) {
+                        // Day9：还没到点，稍后再扫
                         this.scheduleNextTimerTask(nextOffset, DELAY_FOR_A_WHILE);
                         return;
                     }
@@ -438,6 +468,7 @@ public class ScheduleMessageService extends ConfigManager {
                         continue;
                     }
 
+                    // Day9：到期 → 恢复真实 Topic 再写入（消费者可见）
                     MessageExtBrokerInner msgInner = ScheduleMessageService.this.messageTimeup(msgExt);
                     if (TopicValidator.RMQ_SYS_TRANS_HALF_TOPIC.equals(msgInner.getTopic())) {
                         log.error("[BUG] the real topic of schedule msg is {}, discard the msg. msg={}",

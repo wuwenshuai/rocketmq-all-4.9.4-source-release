@@ -82,7 +82,9 @@ ls -lh ~/store/commitlog/
 
 ---
 
-## 4. 本地操作
+## 4. 本地操作（今天最重要）
+
+> 源码里已加 `Day4` 中文注释，IDEA 全局搜 `Day4` 可跳转。
 
 ### 操作 A：发消息前后对比文件
 
@@ -93,21 +95,24 @@ du -sh ~/store/commitlog/*
 ```
 
 1. 记录当前 commitlog 文件大小
-2. Debug/Run Producer 发 1000 条
+2. Debug/Run Producer 发若干条（Day3 已把 `MESSAGE_COUNT` 改成 10）
 3. 再看文件大小是否增长
 
-### 操作 B：断点看写入
+### 操作 B：断点看写入（由外到内）
 
-断点：
+1. `DefaultMessageStore.asyncPutMessage`（门面）
+2. `CommitLog.asyncPutMessage`（加锁、取 MappedFile、append）
+3. `MappedFile.appendMessagesInner` / `DefaultAppendMessageCallback.doAppend`
+4. `CommitLog.submitFlushRequest`（看走 SYNC 还是 ASYNC）
+5. （可选）`GroupCommitService.doCommit` 或 `FlushRealTimeService.run`
+6. （收尾预览）`ReputMessageService.doReput` → `doDispatch`（Day5）
 
-1. `SendMessageProcessor` 调用 `putMessage/asyncPutMessage` 附近
-2. `CommitLog.asyncPutMessage` 入口
-3. `MappedFile.appendMessage`（如果跟得动）
+观察 Variables：
 
-观察：
-
-- `msg.getTopic()`
-- 写入后的 `AppendMessageResult` / `PutMessageResult` 状态
+- `msg.getTopic()` / `queueId`
+- `mappedFile.fileFromOffset`、`wrotePosition`
+- `result.wroteOffset`、`msgId`
+- `flushDiskType`、刷盘 future 状态
 
 ### 操作 C：用工具查消息（验证真的存了）
 

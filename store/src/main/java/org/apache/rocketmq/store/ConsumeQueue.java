@@ -29,9 +29,18 @@ import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.store.config.BrokerRole;
 import org.apache.rocketmq.store.config.StorePathConfigHelper;
 
+/**
+ * Day5：消费队列索引（不是消息本体）。
+ * <pre>
+ *   磁盘：~/store/consumequeue/{topic}/{queueId}/
+ *   每条索引固定 20 字节：commitLogOffset(8) + size(4) + tagsCode(8)
+ * </pre>
+ * 由 {@code ReputMessageService} 从 CommitLog 异步构建；拉消息先查这里再读 CommitLog。
+ */
 public class ConsumeQueue {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
 
+    /** Day5：单条索引长度 = 8+4+8 */
     public static final int CQ_STORE_UNIT_SIZE = 20;
     private static final InternalLogger LOG_ERROR = InternalLoggerFactory.getLogger(LoggerName.STORE_ERROR_LOGGER_NAME);
 
@@ -381,6 +390,9 @@ public class ConsumeQueue {
         return this.minLogicOffset / CQ_STORE_UNIT_SIZE;
     }
 
+    /**
+     * Day5：Reput 派发入口。把一条 CommitLog 消息的位置信息写入本 topic-queue 的索引文件。
+     */
     public void putMessagePositionInfoWrapper(DispatchRequest request, boolean multiQueue) {
         final int maxRetries = 30;
         boolean canWrite = this.defaultMessageStore.getRunningFlags().isCQWriteable();
@@ -400,7 +412,7 @@ public class ConsumeQueue {
                         topic, queueId, request.getCommitLogOffset());
                 }
             }
-            //构建消费端 使用的逻辑队列的数据了
+            // Day5：写入 [phyOffset | size | tagsCode]
             boolean result = this.putMessagePositionInfo(request.getCommitLogOffset(),
                 request.getMsgSize(), tagsCode, request.getConsumeQueueOffset());
             if (result) {
@@ -476,6 +488,10 @@ public class ConsumeQueue {
         }
     }
 
+    /**
+     * Day5：真正写 20 字节索引到 ConsumeQueue 的 MappedFile。
+     * cqOffset = 逻辑队列偏移（第几条），文件内字节位置 = cqOffset * 20。
+     */
     private boolean putMessagePositionInfo(final long offset, final int size, final long tagsCode,
         final long cqOffset) {
 
@@ -486,7 +502,7 @@ public class ConsumeQueue {
 
         this.byteBufferIndex.flip();
         this.byteBufferIndex.limit(CQ_STORE_UNIT_SIZE);
-        //这里就知道了 consumerqueue里面每一条消息 前8个是offset（commitlog中）、中间4个是size、最后8个是tags的hashcode值
+        // Day5：8 字节 CommitLog 物理偏移 + 4 字节消息长度 + 8 字节 Tag 哈希（过滤用）
         this.byteBufferIndex.putLong(offset);
         this.byteBufferIndex.putInt(size);
         this.byteBufferIndex.putLong(tagsCode);
@@ -526,7 +542,7 @@ public class ConsumeQueue {
                 }
             }
             this.maxPhysicOffset = offset + size;
-            //这里最终进行consumequeue数据的追加写入  文件
+            // Day5：追加到 ~/store/consumequeue/{topic}/{queueId}/
             return mappedFile.appendMessage(this.byteBufferIndex.array());
         }
         return false;
@@ -544,6 +560,9 @@ public class ConsumeQueue {
         }
     }
 
+    /**
+     * Day5：按逻辑 queueOffset（第几条）定位索引段，供 getMessage 遍历后去 CommitLog 取正文。
+     */
     public SelectMappedBufferResult getIndexBuffer(final long startIndex) {
         int mappedFileSize = this.mappedFileSize;
         long offset = startIndex * CQ_STORE_UNIT_SIZE;

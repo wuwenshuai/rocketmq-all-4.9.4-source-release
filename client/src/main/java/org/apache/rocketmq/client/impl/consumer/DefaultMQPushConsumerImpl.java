@@ -211,6 +211,16 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         this.offsetStore = offsetStore;
     }
 
+    /**
+     * Day5 客户端主线：对某一个 MessageQueue 发起异步 Pull。
+     * <ol>
+     *   <li>流控：本地 ProcessQueue 堆积太多则延迟再拉（反压）</li>
+     *   <li>pullKernelImpl 发到 Broker（带长轮询 suspend 标记）</li>
+     *   <li>回调 FOUND → 放入 ProcessQueue → consumeMessageService 提交业务线程</li>
+     *   <li>立刻/稍后再次 executePullRequest，形成「拉→消费→再拉」循环</li>
+     * </ol>
+     * 这就是「Push API、底层真拉」。
+     */
     public void pullMessage(final PullRequest pullRequest) {
         final ProcessQueue processQueue = pullRequest.getProcessQueue();
         if (processQueue.isDropped()) {
@@ -237,6 +247,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         long cachedMessageCount = processQueue.getMsgCount().get();
         long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);
 
+        // Day5：本地缓存过多 → 先不拉，避免拖垮消费端（天然反压）
         if (cachedMessageCount > this.defaultMQPushConsumer.getPullThresholdForQueue()) {
             this.executePullRequestLater(pullRequest, PULL_TIME_DELAY_MILLS_WHEN_FLOW_CONTROL);
             if ((queueFlowControlTimes++ % 1000) == 0) {
@@ -329,7 +340,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
 
                                 DefaultMQPushConsumerImpl.this.getConsumerStatsManager().incPullTPS(pullRequest.getConsumerGroup(),
                                     pullRequest.getMessageQueue().getTopic(), pullResult.getMsgFoundList().size());
-                                //这里是客户端 拉取完消息后，放入到本地队列
+                                // Day5：先放进本地 ProcessQueue，再丢给消费线程池
                                 boolean dispatchToConsume = processQueue.putMessage(pullResult.getMsgFoundList());
                                 DefaultMQPushConsumerImpl.this.consumeMessageService.submitConsumeRequest(
                                     pullResult.getMsgFoundList(),
@@ -337,6 +348,7 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                                     pullRequest.getMessageQueue(),
                                     dispatchToConsume);
 
+                                // Day5：拉完立刻（或按 pullInterval）再拉同一队列，形成循环
                                 if (DefaultMQPushConsumerImpl.this.defaultMQPushConsumer.getPullInterval() > 0) {
                                     DefaultMQPushConsumerImpl.this.executePullRequestLater(pullRequest,
                                         DefaultMQPushConsumerImpl.this.defaultMQPushConsumer.getPullInterval());
@@ -426,11 +438,12 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
 
         int sysFlag = PullSysFlag.buildSysFlag(
             commitOffsetEnable, // commitOffset
-            true, // suspend
+            true, // suspend —— Day5：告诉 Broker 没消息可以挂起（长轮询）
             subExpression != null, // subscription
             classFilter // class filter
         );
         try {
+            // Day5：异步发 Pull 到 Broker；回调见上面的 pullCallback
             this.pullAPIWrapper.pullKernelImpl(
                 pullRequest.getMessageQueue(),
                 subExpression,
@@ -572,6 +585,9 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         }
     }
 
+    /**
+     * Day5：启动 PushConsumer。注册客户端、准备 OffsetStore/拉取/消费服务，随后会触发首次 Rebalance（Day6）。
+     */
     public synchronized void start() throws MQClientException {
         switch (this.serviceState) {
             case CREATE_JUST:
@@ -588,12 +604,12 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                 }
                 //3、拿到mQClientFactory 的实例
                 this.mQClientFactory = MQClientManager.getInstance().getOrCreateMQClientInstance(this.defaultMQPushConsumer, this.rpcHook);
-                //4、这个是做负载均衡（消费者  群组的方式启动。消费者 动态增加、减少）
+                // Day6：重平衡组件（上下线时重新分队列）
                 this.rebalanceImpl.setConsumerGroup(this.defaultMQPushConsumer.getConsumerGroup());
                 this.rebalanceImpl.setMessageModel(this.defaultMQPushConsumer.getMessageModel());
                 this.rebalanceImpl.setAllocateMessageQueueStrategy(this.defaultMQPushConsumer.getAllocateMessageQueueStrategy());
                 this.rebalanceImpl.setmQClientFactory(this.mQClientFactory);
-                //5、这个是一个拉取消息的 核心类（消费 首先要从RocketMQ的broker要拉取消息过来）
+                // Day5：封装向 Broker 发 Pull 请求
                 this.pullAPIWrapper = new PullAPIWrapper(
                     mQClientFactory,
                     this.defaultMQPushConsumer.getConsumerGroup(), isUnitMode());
@@ -604,9 +620,11 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
                 } else {
                     switch (this.defaultMQPushConsumer.getMessageModel()) {
                         case BROADCASTING:
+                            // Day6：广播 → 进度存本地
                             this.offsetStore = new LocalFileOffsetStore(this.mQClientFactory, this.defaultMQPushConsumer.getConsumerGroup());
                             break;
                         case CLUSTERING:
+                            // Day6：集群 → 进度存 Broker（RemoteBrokerOffsetStore → ConsumerOffsetManager）
                             this.offsetStore = new RemoteBrokerOffsetStore(this.mQClientFactory, this.defaultMQPushConsumer.getConsumerGroup());
                             break;
                         default:
@@ -1002,6 +1020,10 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         return new HashSet<SubscriptionData>(this.rebalanceImpl.getSubscriptionInner().values());
     }
 
+    /**
+     * Day6：触发重平衡入口（定时 / 成员变化时调用）。
+     * 真正逻辑在 {@link RebalanceImpl#doRebalance}：按策略给本实例分配 MessageQueue。
+     */
     @Override
     public void doRebalance() {
         if (!this.pause) {
@@ -1009,6 +1031,9 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
         }
     }
 
+    /**
+     * Day6：把内存里的消费进度持久化（集群模式会同步到 Broker → ConsumerOffsetManager）。
+     */
     @Override
     public void persistConsumerOffset() {
         try {

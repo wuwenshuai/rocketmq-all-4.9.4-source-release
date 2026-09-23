@@ -88,25 +88,31 @@ RocketMQ 也有重平衡，但机制更轻；**队列数要 ≥ 消费者实例�
 
 ## 4. 本地操作
 
+> 源码里已加 `Day6` 中文注释，IDEA 全局搜 `Day6` 可跳转。
+
 ### 操作 A：制造一点堆积
 
-1. Consumer 里把消费逻辑改成 `Thread.sleep(2000)`（故意变慢）
-2. Producer 快速发 500 条
+1. Consumer 里把消费逻辑改成 `Thread.sleep(2000)`（故意变慢；代码里已有提示）
+2. Producer 快速发若干条
 3. 另开终端：
 
 ```bash
 cd /Users/wl/Desktop/code/rocketmq-all-4.9.4-source-release/distribution/target/rocketmq-4.9.4/rocketmq-4.9.4
-sh bin/mqadmin consumerProgress -n 127.0.0.1:9876 -g <你的consumerGroup>
+sh bin/mqadmin consumerProgress -n 127.0.0.1:9876 -g please_rename_unique_group_name_4
 ```
 
 观察 diff（堆积数）是否变大，再变小。
 
 ### 操作 B：断点看重平衡
 
-1. 断点：`RebalanceImpl.doRebalance`
+1. 断点：
+   - `DefaultMQPushConsumerImpl.doRebalance`
+   - `RebalanceImpl.doRebalance` / `rebalanceByTopic`
+   - `AllocateMessageQueueAveragely.allocate`
+   - `updateProcessQueueTableInRebalance`（看 add/remove mq）
 2. 启动第一个 Consumer
-3. 再启动第二个同组 Consumer（改个实例，同 group）
-4. 看日志里队列重新分配
+3. 再启动第二个同组 Consumer（同 `CONSUMER_GROUP`，不同进程即可）
+4. 看日志 `rebalanced result changed` 与队列重新分配
 
 ### 操作 C：看位点文件变化
 
@@ -116,7 +122,7 @@ sh bin/mqadmin consumerProgress -n 127.0.0.1:9876 -g <你的consumerGroup>
 cat ~/store/config/consumerOffset.json
 ```
 
-对照你的 group / topic / queue。
+对照你的 group / topic / queue。相关类：`ConsumerOffsetManager.commitOffset`。
 
 ---
 

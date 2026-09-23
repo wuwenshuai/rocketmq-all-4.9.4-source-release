@@ -1119,6 +1119,10 @@ public class DefaultMQProducerImpl implements MQProducerInner {
     /**
      * SELECT SYNC -------------------------------------------------------
      */
+    /**
+     * Day7：带 MessageQueueSelector 的发送（顺序消息发送侧核心）。
+     * selector.select(队列列表, msg, arg) 用业务键（如 orderId）哈希固定队列，再走 sendKernelImpl。
+     */
     public SendResult send(Message msg, MessageQueueSelector selector, Object arg)
         throws MQClientException, RemotingException, MQBrokerException, InterruptedException {
         return send(msg, selector, arg, this.defaultMQProducer.getSendMsgTimeout());
@@ -1129,6 +1133,9 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         return this.sendSelectImpl(msg, selector, arg, CommunicationMode.SYNC, null, timeout);
     }
 
+    /**
+     * Day7：真正执行「选队列 → 发到该队列」。对比普通 send 的轮询选队列。
+     */
     private SendResult sendSelectImpl(
         Message msg,
         MessageQueueSelector selector,
@@ -1150,6 +1157,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                 String userTopic = NamespaceUtil.withoutNamespace(userMessage.getTopic(), mQClientFactory.getClientConfig().getNamespace());
                 userMessage.setTopic(userTopic);
 
+                // Day7：业务自定义选队列（同一 arg 应总落到同一 mq）
                 mq = mQClientFactory.getClientConfig().queueWithNamespace(selector.select(messageQueueList, userMessage, arg));
             } catch (Throwable e) {
                 throw new MQClientException("select message queue threw exception.", e);
@@ -1236,6 +1244,14 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         }
     }
 
+    /**
+     * Day8：事务消息客户端主流程。
+     * <ol>
+     *   <li>打 TRANSACTION_PREPARED 标记，先发半消息（消费者不可见）</li>
+     *   <li>executeLocalTransaction：执行本地事务，返回 COMMIT/ROLLBACK/UNKNOWN</li>
+     *   <li>endTransaction：通知 Broker 提交或回滚；UNKNOWN 则等 Broker 回查</li>
+     * </ol>
+     */
     public TransactionSendResult sendMessageInTransaction(final Message msg,
         final LocalTransactionExecuter localTransactionExecuter, final Object arg)
         throws MQClientException {
@@ -1252,6 +1268,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         Validators.checkMessage(msg, this.defaultMQProducer);
 
         SendResult sendResult = null;
+        // Day8-1：标记半消息，Broker 走 prepareMessage 而不是普通 put
         MessageAccessor.putProperty(msg, MessageConst.PROPERTY_TRANSACTION_PREPARED, "true");
         MessageAccessor.putProperty(msg, MessageConst.PROPERTY_PRODUCER_GROUP, this.defaultMQProducer.getProducerGroup());
         try {
@@ -1276,6 +1293,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
                         localTransactionState = localTransactionExecuter.executeLocalTransactionBranch(msg, arg);
                     } else if (transactionListener != null) {
                         log.debug("Used new transaction API");
+                        // Day8-2：执行本地事务（改库等），返回三态之一
                         localTransactionState = transactionListener.executeLocalTransaction(msg, arg);
                     }
                     if (null == localTransactionState) {
@@ -1303,6 +1321,7 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         }
 
         try {
+            // Day8-3：二次确认（commit/rollback）；UNKNOWN 时 Broker 稍后会 checkLocalTransaction
             this.endTransaction(msg, sendResult, localTransactionState, localException);
         } catch (Exception e) {
             log.warn("local transaction execute " + localTransactionState + ", but end broker transaction failed", e);
@@ -1326,6 +1345,10 @@ public class DefaultMQProducerImpl implements MQProducerInner {
         return send(msg, this.defaultMQProducer.getSendMsgTimeout());
     }
 
+    /**
+     * Day8：把本地事务结果告诉 Broker（END_TRANSACTION）。
+     * COMMIT → 半消息对消费者可见；ROLLBACK → 丢弃；NOT_TYPE(UNKNOWN) → 等回查。
+     */
     public void endTransaction(
         final Message msg,
         final SendResult sendResult,

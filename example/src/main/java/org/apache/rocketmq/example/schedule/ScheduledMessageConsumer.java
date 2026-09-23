@@ -21,6 +21,9 @@ import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
 import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
 import org.apache.rocketmq.common.message.MessageExt;
 
+/**
+ * Day9：延时消息消费。先启本类，再启 Producer，观察 storeTimestamp - bornTimestamp ≈ 延迟。
+ */
 public class ScheduledMessageConsumer {
 
     public static final String CONSUMER_GROUP = "ExampleConsumer";
@@ -31,7 +34,7 @@ public class ScheduledMessageConsumer {
         // Instantiate message consumer
         DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(CONSUMER_GROUP);
 
-        // Uncomment the following line while debugging, namesrvAddr should be set to your local address
+        // Day9：本地调试
         consumer.setNamesrvAddr(DEFAULT_NAMESRVADDR);
 
         // Subscribe topics
@@ -39,7 +42,7 @@ public class ScheduledMessageConsumer {
         // Register message listener
         consumer.registerMessageListener((MessageListenerConcurrently) (messages, context) -> {
             for (MessageExt message : messages) {
-                // Print approximate delay time period
+                // Day9：打印实际延迟毫秒数
                 System.out.printf("Receive message[msgId=%s %d  ms later]\n", message.getMsgId(),
                         message.getStoreTimestamp()- message.getBornTimestamp());
             }

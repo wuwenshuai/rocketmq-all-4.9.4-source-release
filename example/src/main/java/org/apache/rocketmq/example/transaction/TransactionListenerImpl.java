@@ -24,6 +24,10 @@ import org.apache.rocketmq.common.message.MessageExt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Day8：事务回调。executeLocalTransaction 做本地事务；checkLocalTransaction 供 Broker 回查。
+ * 本示例故意先返回 UNKNOWN，把真实结果留给回查，方便断点看 check。
+ */
 public class TransactionListenerImpl implements TransactionListener {
     private AtomicInteger transactionIndex = new AtomicInteger(0);
 
@@ -31,6 +35,7 @@ public class TransactionListenerImpl implements TransactionListener {
 
     @Override
     public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+        // Day8：模拟本地事务结果记在内存；先返回 UNKNOWN 触发回查路径
         int value = transactionIndex.getAndIncrement();
         int status = value % 3;
         localTrans.put(msg.getTransactionId(), status);
@@ -39,6 +44,7 @@ public class TransactionListenerImpl implements TransactionListener {
 
     @Override
     public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        // Day8：Broker 回查时走到这里（断点打这里）
         Integer status = localTrans.get(msg.getTransactionId());
         if (null != status) {
             switch (status) {

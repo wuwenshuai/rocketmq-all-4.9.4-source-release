@@ -33,10 +33,16 @@ import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.protocol.RemotingSerializable;
 
+/**
+ * Day6：Broker 上保存消费进度（集群模式默认）。
+ * key = topic@group → (queueId → offset)，持久化到 ~/store/config/consumerOffset.json。
+ * 堆积 ≈ 队列最大 offset - 这里提交的 offset。
+ */
 public class ConsumerOffsetManager extends ConfigManager {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     protected static final String TOPIC_GROUP_SEPARATOR = "@";
 
+    /** Day6：内存位点表 */
     protected ConcurrentMap<String/* topic@group */, ConcurrentMap<Integer, Long>> offsetTable =
         new ConcurrentHashMap<String, ConcurrentMap<Integer, Long>>(512);
 
@@ -118,6 +124,9 @@ public class ConsumerOffsetManager extends ConfigManager {
         return groups;
     }
 
+    /**
+     * Day6：提交某组在某 topic-queue 上的消费进度（客户端 persist / 拉请求带 commitOffset 时调用）。
+     */
     public void commitOffset(final String clientHost, final String group, final String topic, final int queueId,
         final long offset) {
         // topic@group
@@ -139,6 +148,9 @@ public class ConsumerOffsetManager extends ConfigManager {
         }
     }
 
+    /**
+     * Day6：查询进度；没有则返回 -1（新组会按 consumeFromWhere 决定从哪开始）。
+     */
     public long queryOffset(final String group, final String topic, final int queueId) {
         // topic@group
         String key = topic + TOPIC_GROUP_SEPARATOR + group;

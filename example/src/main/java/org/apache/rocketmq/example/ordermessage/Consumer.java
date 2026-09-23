@@ -27,6 +27,9 @@ import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.message.MessageExt;
 
+/**
+ * Day7：顺序消费示例。MessageListenerOrderly + ConsumeMessageOrderlyService 串行处理同队列。
+ */
 public class Consumer {
 
     public static void main(String[] args) throws MQClientException {
@@ -37,6 +40,7 @@ public class Consumer {
 
         consumer.subscribe("OrderTopic", "TagA || TagC || TagD");
 
+        // Day7：必须用 Orderly 监听器，不能用 Concurrently，否则不保证顺序
         consumer.registerMessageListener(new MessageListenerOrderly() {
             AtomicLong consumeTimes = new AtomicLong(0);
 
@@ -51,6 +55,7 @@ public class Consumer {
                 if ((this.consumeTimes.get() % 2) == 0) {
                     return ConsumeOrderlyStatus.SUCCESS;
                 } else if ((this.consumeTimes.get() % 5) == 0) {
+                    // Day7：暂时挂起本队列（不影响其他队列）——失败处理不当会影响顺序
                     context.setSuspendCurrentQueueTimeMillis(3000);
                     return ConsumeOrderlyStatus.SUSPEND_CURRENT_QUEUE_A_MOMENT;
                 }

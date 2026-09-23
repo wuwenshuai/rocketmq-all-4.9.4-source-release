@@ -43,6 +43,15 @@ import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.apache.rocketmq.store.util.LibC;
 import sun.nio.ch.DirectBuffer;
 
+/**
+ * Day4：单个物理文件的 mmap 封装（CommitLog / ConsumeQueue 都用它）。
+ * <pre>
+ *   wrotePosition  → 已写入 PageCache / 堆外的位置
+ *   flushedPosition → 已 force 到磁盘的位置
+ *   fileFromOffset  → 文件名对应的全局起始物理偏移
+ * </pre>
+ * CommitLog 默认 fileSize ≈ 1GB，写满由 MappedFileQueue 滚动下一个。
+ */
 public class MappedFile extends ReferenceResource {
     public static final int OS_PAGE_SIZE = 1024 * 4;
     protected static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
@@ -50,19 +59,24 @@ public class MappedFile extends ReferenceResource {
     private static final AtomicLong TOTAL_MAPPED_VIRTUAL_MEMORY = new AtomicLong(0);
 
     private static final AtomicInteger TOTAL_MAPPED_FILES = new AtomicInteger(0);
+    /** Day4：当前写到文件内哪个字节（相对偏移） */
     protected final AtomicInteger wrotePosition = new AtomicInteger(0);
     protected final AtomicInteger committedPosition = new AtomicInteger(0);
+    /** Day4：已刷盘到哪里（相对偏移）；异步刷盘时会落后于 wrotePosition */
     private final AtomicInteger flushedPosition = new AtomicInteger(0);
     protected int fileSize;
     protected FileChannel fileChannel;
     /**
      * Message will put to here first, and then reput to FileChannel if writeBuffer is not null.
+     * Day4：一般为空，直接写 mappedByteBuffer；开启 transientStorePool 时才用堆外 writeBuffer。
      */
     protected ByteBuffer writeBuffer = null;
     protected TransientStorePool transientStorePool = null;
     private String fileName;
+    /** Day4：本文件对应的全局起始 offset（= 文件名数字） */
     private long fileFromOffset;
     private File file;
+    /** Day4：mmap 映射；append 写这里，flush 时 force */
     private MappedByteBuffer mappedByteBuffer;
     private volatile long storeTimestamp = 0;
     private boolean firstCreateInQueue = false;
@@ -170,7 +184,7 @@ public class MappedFile extends ReferenceResource {
 
         try {
             this.fileChannel = new RandomAccessFile(this.file, "rw").getChannel();
-            //这段代码是一个典型的mmap的零拷贝  (这里的 文件 即 内存了mappedByteBuffer)
+            // Day4：mmap —— 文件映射到进程地址空间，后续 append 像写内存，由 OS 管 PageCache
             this.mappedByteBuffer = this.fileChannel.map(MapMode.READ_WRITE, 0, fileSize);
             TOTAL_MAPPED_VIRTUAL_MEMORY.addAndGet(fileSize);
             TOTAL_MAPPED_FILES.incrementAndGet();
@@ -210,6 +224,10 @@ public class MappedFile extends ReferenceResource {
         return appendMessagesInner(messageExtBatch, cb, putMessageContext);
     }
 
+    /**
+     * Day4：在当前写指针处追加一条（或一批）消息。
+     * 委托 {@link AppendMessageCallback#doAppend} 填字节，再推进 wrotePosition。
+     */
     public AppendMessageResult appendMessagesInner(final MessageExt messageExt, final AppendMessageCallback cb,
             PutMessageContext putMessageContext) {
         assert messageExt != null;
@@ -218,8 +236,7 @@ public class MappedFile extends ReferenceResource {
         int currentPos = this.wrotePosition.get();
 
         if (currentPos < this.fileSize) {
-            //ByteBuffer是 消息存储的底层的类(以下代码默认是用mappedByteBuffer基于MMAP的零拷贝技术)
-            //那么writeBuffer 是什么呢？
+            // Day4：默认用 mappedByteBuffer.slice()；有 writeBuffer 则先写堆外再 commit
             ByteBuffer byteBuffer = writeBuffer != null ? writeBuffer.slice() : this.mappedByteBuffer.slice();
             byteBuffer.position(currentPos);
             AppendMessageResult result;
@@ -232,6 +249,7 @@ public class MappedFile extends ReferenceResource {
             } else {
                 return new AppendMessageResult(AppendMessageStatus.UNKNOWN_ERROR);
             }
+            // Day4：推进写指针（此时数据在 PageCache，未必已上盘）
             this.wrotePosition.addAndGet(result.getWroteBytes());
             this.storeTimestamp = result.getStoreTimestamp();
             return result;
@@ -287,6 +305,9 @@ public class MappedFile extends ReferenceResource {
     }
 
     /**
+     * Day4：把脏页刷到磁盘。{@code mappedByteBuffer.force()} / {@code fileChannel.force(false)}。
+     * flushLeastPages：脏数据不足 N 页时可跳过（异步刷盘攒批）；传 0 表示尽量刷干净。
+     *
      * @return The current flushed position
      */
     public int flush(final int flushLeastPages) {
@@ -299,6 +320,7 @@ public class MappedFile extends ReferenceResource {
                     if (writeBuffer != null || this.fileChannel.position() != 0) {
                         this.fileChannel.force(false);
                     } else {
+                        // Day4：同步/异步刷盘最终都落到这句（或上面的 channel.force）
                         this.mappedByteBuffer.force();
                     }
                 } catch (Throwable e) {

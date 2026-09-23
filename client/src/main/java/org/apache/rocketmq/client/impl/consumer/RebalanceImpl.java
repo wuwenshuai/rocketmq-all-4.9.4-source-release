@@ -41,8 +41,13 @@ import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
 import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
 import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 
+/**
+ * Day6：重平衡核心。按消费组内所有客户端 ID + Topic 下全部 MessageQueue，用策略算出「我该负责哪些队列」。
+ * 分配单位是队列（不是单条消息）；结果写入 processQueueTable，并 dispatchPullRequest 启动拉取。
+ */
 public abstract class RebalanceImpl {
     protected static final InternalLogger log = ClientLogger.getLog();
+    /** Day6：本实例当前负责的队列 → 本地处理队列（缓存未消费完的消息） */
     protected final ConcurrentMap<MessageQueue, ProcessQueue> processQueueTable = new ConcurrentHashMap<MessageQueue, ProcessQueue>(64);
     protected final ConcurrentMap<String/* topic */, Set<MessageQueue>> topicSubscribeInfoTable =
         new ConcurrentHashMap<String, Set<MessageQueue>>();
@@ -214,6 +219,9 @@ public abstract class RebalanceImpl {
         }
     }
 
+    /**
+     * Day6 主线：对每个订阅 Topic 做一次 rebalanceByTopic，再清掉不该管的队列。
+     */
     public void doRebalance(final boolean isOrder) {
         Map<String, SubscriptionData> subTable = this.getSubscriptionInner();
         if (subTable != null) {
@@ -236,6 +244,10 @@ public abstract class RebalanceImpl {
         return subscriptionInner;
     }
 
+    /**
+     * Day6：按 Topic 分配队列。
+     * 广播：每人拿全部队列；集群：拉同组 cid 列表 → AllocateMessageQueueStrategy.allocate → 更新 ProcessQueue。
+     */
     private void rebalanceByTopic(final String topic, final boolean isOrder) {
         switch (messageModel) {
             case BROADCASTING: {
@@ -257,7 +269,7 @@ public abstract class RebalanceImpl {
             }
             case CLUSTERING: {
                 Set<MessageQueue> mqSet = this.topicSubscribeInfoTable.get(topic);
-                //拿到了消息的主题 的队列信息
+                // Day6：该 Topic 全部队列 + 同组全部消费者 ClientId
                 List<String> cidAll = this.mQClientFactory.findConsumerIdList(topic, consumerGroup);
                 if (null == mqSet) {
                     if (!topic.startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
@@ -280,6 +292,7 @@ public abstract class RebalanceImpl {
 
                     List<MessageQueue> allocateResult = null;
                     try {
+                        // Day6：默认平均分配（AllocateMessageQueueAveragely）
                         allocateResult = strategy.allocate(
                             this.consumerGroup,
                             this.mQClientFactory.getClientId(),
@@ -327,6 +340,11 @@ public abstract class RebalanceImpl {
         }
     }
 
+    /**
+     * Day6：根据新分配结果增删 ProcessQueue。
+     * 丢掉不再属于我的队列；新增队列则算 nextOffset 并构造 PullRequest 交给 PullMessageService。
+     * 注意：消费者数 > 队列数时，多出来的实例 allocate 结果为空，会闲着。
+     */
     private boolean updateProcessQueueTableInRebalance(final String topic, final Set<MessageQueue> mqSet,
         final boolean isOrder) {
         boolean changed = false;
@@ -339,6 +357,7 @@ public abstract class RebalanceImpl {
 
             if (mq.getTopic().equals(topic)) {
                 if (!mqSet.contains(mq)) {
+                    // Day6：这个队列不再归我 → drop + 移除
                     pq.setDropped(true);
                     if (this.removeUnnecessaryMessageQueue(mq, pq)) {
                         it.remove();
@@ -389,6 +408,7 @@ public abstract class RebalanceImpl {
                     if (pre != null) {
                         log.info("doRebalance, {}, mq already exists, {}", consumerGroup, mq);
                     } else {
+                        // Day6：新分到的队列 → 创建 PullRequest，后续 PullMessageService 开始拉
                         log.info("doRebalance, {}, add a new mq, {}", consumerGroup, mq);
                         PullRequest pullRequest = new PullRequest();
                         pullRequest.setConsumerGroup(consumerGroup);

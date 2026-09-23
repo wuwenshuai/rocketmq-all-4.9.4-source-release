@@ -43,6 +43,10 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Day8：Broker 事务消息服务。半消息进内部 Topic（RMQ_SYS_TRANS_HALF_TOPIC），消费者看不到；
+ * commit/rollback 后再决定是否投递到真实 Topic；超时未决则 check 回查生产者。
+ */
 public class TransactionalMessageServiceImpl implements TransactionalMessageService {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.TRANSACTION_LOGGER_NAME);
 
@@ -61,11 +65,13 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
     private ConcurrentHashMap<MessageQueue, MessageQueue> opQueueMap = new ConcurrentHashMap<>();
 
     @Override
+    /** Day8：异步存半消息（SendMessageProcessor 事务分支调用） */
     public CompletableFuture<PutMessageResult> asyncPrepareMessage(MessageExtBrokerInner messageInner) {
         return transactionalMessageBridge.asyncPutHalfMessage(messageInner);
     }
 
     @Override
+    /** Day8：同步存半消息 */
     public PutMessageResult prepareMessage(MessageExtBrokerInner messageInner) {
         return transactionalMessageBridge.putHalfMessage(messageInner);
     }
@@ -123,6 +129,10 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
         }
     }
 
+    /**
+     * Day8：扫描半消息队列，对超时未 commit/rollback 的消息回查生产者（checkLocalTransaction）。
+     * 内部 Topic：RMQ_SYS_TRANS_HALF_TOPIC；已处理的记在 op 队列里避免重复回查。
+     */
     @Override
     public void check(long transactionTimeout, int transactionCheckMax,
         AbstractTransactionalMessageCheckListener listener) {
@@ -227,6 +237,7 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
                             if (!putBackHalfMsgQueue(msgExt, i)) {
                                 continue;
                             }
+                            // Day8：真正发起回查 → 客户端 TransactionListener.checkLocalTransaction
                             listener.resolveHalfMsg(msgExt);
                         } else {
                             pullResult = fillOpRemoveMap(removeMap, opQueue, pullResult.getNextBeginOffset(), halfOffset, doneOpOffset);
@@ -475,11 +486,13 @@ public class TransactionalMessageServiceImpl implements TransactionalMessageServ
     }
 
     @Override
+    /** Day8：按 CommitLog 偏移取出半消息，供后续 commit 投递到真实 Topic */
     public OperationResult commitMessage(EndTransactionRequestHeader requestHeader) {
         return getHalfMessageByOffset(requestHeader.getCommitLogOffset());
     }
 
     @Override
+    /** Day8：回滚时同样先定位半消息，再标记删除/不再投递 */
     public OperationResult rollbackMessage(EndTransactionRequestHeader requestHeader) {
         return getHalfMessageByOffset(requestHeader.getCommitLogOffset());
     }

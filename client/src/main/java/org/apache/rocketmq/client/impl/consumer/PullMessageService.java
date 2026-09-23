@@ -27,8 +27,13 @@ import org.apache.rocketmq.common.ServiceThread;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.common.utils.ThreadUtils;
 
+/**
+ * Day5：PushConsumer 背后的拉取线程（伪推真拉）。
+ * 队列里每个 PullRequest 对应「某个 MessageQueue 要继续拉」；take 后调 DefaultMQPushConsumerImpl.pullMessage。
+ */
 public class PullMessageService extends ServiceThread {
     private final InternalLogger log = ClientLogger.getLog();
+    /** Day5：待拉取任务队列；重平衡分配到队列后会往这里丢 PullRequest */
     private final LinkedBlockingQueue<PullRequest> pullRequestQueue = new LinkedBlockingQueue<PullRequest>();
     private final MQClientInstance mQClientFactory;
     private final ScheduledExecutorService scheduledExecutorService = Executors
@@ -43,6 +48,7 @@ public class PullMessageService extends ServiceThread {
         this.mQClientFactory = mQClientFactory;
     }
 
+    /** Day5：流控/异常时延迟再拉 */
     public void executePullRequestLater(final PullRequest pullRequest, final long timeDelay) {
         if (!isStopped()) {
             this.scheduledExecutorService.schedule(new Runnable() {
@@ -56,6 +62,7 @@ public class PullMessageService extends ServiceThread {
         }
     }
 
+    /** Day5：立刻入队，唤醒 run 循环 */
     public void executePullRequestImmediately(final PullRequest pullRequest) {
         try {
             this.pullRequestQueue.put(pullRequest);
@@ -80,6 +87,7 @@ public class PullMessageService extends ServiceThread {
         final MQConsumerInner consumer = this.mQClientFactory.selectConsumer(pullRequest.getConsumerGroup());
         if (consumer != null) {
             DefaultMQPushConsumerImpl impl = (DefaultMQPushConsumerImpl) consumer;
+            // Day5：转到具体 Consumer 实现去发网络 Pull
             impl.pullMessage(pullRequest);
         } else {
             log.warn("No matched consumer for the PullRequest {}, drop it", pullRequest);
@@ -92,7 +100,7 @@ public class PullMessageService extends ServiceThread {
 
         while (!this.isStopped()) {
             try {
-                //生产者虽然可以启动到这里，但是 pullRequestQueue 没有元素，这里的take就会阻塞
+                // Day5：阻塞取下一个队列的拉请求；没分配到队列时会一直等（重平衡后才有任务）
                 PullRequest pullRequest = this.pullRequestQueue.take();
                 this.pullMessage(pullRequest);
             } catch (InterruptedException ignored) {

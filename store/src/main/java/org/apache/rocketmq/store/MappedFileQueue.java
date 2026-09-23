@@ -30,6 +30,10 @@ import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 
+/**
+ * Day4：一组 MappedFile 组成的逻辑队列（CommitLog 目录下多个 1GB 文件）。
+ * 负责：取最后一个文件、写满时创建下一个、按 flushedWhere 推进刷盘位点。
+ */
 public class MappedFileQueue {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.STORE_LOGGER_NAME);
     private static final InternalLogger LOG_ERROR = InternalLoggerFactory.getLogger(LoggerName.STORE_ERROR_LOGGER_NAME);
@@ -197,6 +201,9 @@ public class MappedFileQueue {
         return 0;
     }
 
+    /**
+     * Day4：取最后一个 MappedFile；若为空或已满且 needCreate，则创建下一个（文件名=起始物理偏移）。
+     */
     public MappedFile getLastMappedFile(final long startOffset, boolean needCreate) {
         long createOffset = -1;
         MappedFile mappedFileLast = getLastMappedFile();
@@ -206,6 +213,7 @@ public class MappedFileQueue {
         }
 
         if (mappedFileLast != null && mappedFileLast.isFull()) {
+            // Day4：当前文件写满 → 下一个文件起始 offset = 上一个起始 + 文件大小
             createOffset = mappedFileLast.getFileFromOffset() + this.mappedFileSize;
         }
 
@@ -436,6 +444,9 @@ public class MappedFileQueue {
         return deleteCount;
     }
 
+    /**
+     * Day4：从 flushedWhere 对应的 MappedFile 开始 flush，并更新全局已刷物理偏移。
+     */
     public boolean flush(final int flushLeastPages) {
         boolean result = true;
         MappedFile mappedFile = this.findMappedFileByOffset(this.flushedWhere, this.flushedWhere == 0);
